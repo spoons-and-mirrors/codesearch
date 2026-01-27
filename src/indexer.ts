@@ -56,8 +56,8 @@ export class CodeIndexer {
 
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
-    this.indexDir = path.join(projectRoot, '.opencode', 'plugins', 'codesearch', 'index');
-    this.stateFile = path.join(projectRoot, '.opencode', 'plugins', 'codesearch', 'state.json');
+    this.indexDir = path.join(projectRoot, '.opencode', 'plugin', 'codesearch', 'index');
+    this.stateFile = path.join(projectRoot, '.opencode', 'plugin', 'codesearch', 'state.json');
     this.index = new LocalIndex(this.indexDir);
   }
 
@@ -71,11 +71,24 @@ export class CodeIndexer {
     }
   }
 
-  async indexProject(): Promise<{ indexed: number; skipped: number }> {
+  async indexProject(): Promise<{ indexed: number; skipped: number; deleted: number }> {
     const files = this.collectFiles(this.projectRoot);
+    const relFiles = new Set(files.map((f) => path.relative(this.projectRoot, f)));
     let indexed = 0;
     let skipped = 0;
+    let deleted = 0;
 
+    // Handle deletions
+    for (const rel of Object.keys(this.state.hashes)) {
+      if (!relFiles.has(rel)) {
+        log.info(`Removing deleted file: ${rel}`);
+        await this.removeFile(rel);
+        delete this.state.hashes[rel];
+        deleted++;
+      }
+    }
+
+    // Handle additions/modifications
     for (const file of files) {
       const content = fs.readFileSync(file, 'utf-8');
       const hash = crypto.createHash('sha256').update(content).digest('hex');
@@ -93,17 +106,21 @@ export class CodeIndexer {
 
     this.state.lastIndexed = Date.now();
     fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
-    log.info(`Indexed ${indexed} files, skipped ${skipped}`);
-    return { indexed, skipped };
+    log.info(`Indexed ${indexed} files, skipped ${skipped}, deleted ${deleted}`);
+    return { indexed, skipped, deleted };
   }
 
-  private async indexFile(filePath: string, content: string, hash: string): Promise<void> {
+  async removeFile(filePath: string): Promise<void> {
     const existing = await this.index.listItems();
     for (const item of existing) {
       if (item.metadata.filePath === filePath) {
         await this.index.deleteItem(item.id);
       }
     }
+  }
+
+  async indexFile(filePath: string, content: string, hash: string): Promise<void> {
+    await this.removeFile(filePath);
 
     const chunks = this.chunkContent(content, filePath, hash);
     let indexed = 0;
@@ -192,5 +209,46 @@ export class CodeIndexer {
 
   isIndexed(): boolean {
     return this.state.lastIndexed > 0;
+  }
+
+  watch(): void {
+    log.info(`Watching for changes in ${this.projectRoot}...`);
+    fs.watch(this.projectRoot, { recursive: true }, async (event, filename) => {
+      try {
+        if (!filename) return;
+
+        // Skip excluded paths
+        const parts = filename.split(path.sep);
+        if (parts.some((p) => EXCLUDE_DIRS.has(p))) return;
+
+        const ext = path.extname(filename);
+        if (!EXTENSIONS.has(ext)) return;
+        if (filename.includes('.test.') || filename.includes('.spec.')) return;
+
+        const fullPath = path.join(this.projectRoot, filename);
+
+        if (!fs.existsSync(fullPath)) {
+          // Deletion
+          log.info(`File deleted: ${filename}`);
+          await this.removeFile(filename);
+          delete this.state.hashes[filename];
+        } else {
+          // Addition or modification
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          const hash = crypto.createHash('sha256').update(content).digest('hex');
+
+          if (this.state.hashes[filename] === hash) return;
+
+          log.info(`File ${event === 'rename' ? 'added' : 'changed'}: ${filename}`);
+          await this.indexFile(filename, content, hash);
+          this.state.hashes[filename] = hash;
+        }
+
+        this.state.lastIndexed = Date.now();
+        fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
+      } catch (err: any) {
+        log.error(`Watch error for ${filename}`, err.message);
+      }
+    });
   }
 }

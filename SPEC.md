@@ -4,7 +4,7 @@
 
 A semantic codebase search plugin for OpenCode that indexes code using local embeddings and provides fast, contextually-aware search through a single `codebase_search` tool.
 
-**Location:** `~/.config/opencode/plugins/codesearch/`
+**Location:** `~/.config/opencode/plugin/codesearch/`
 
 ## Core Capabilities
 
@@ -71,12 +71,12 @@ A semantic codebase search plugin for OpenCode that indexes code using local emb
 - Simple API, minimal learning curve
 - Suitable for codebases up to ~10k chunks
 
-**Storage Location:** `/.opencode/plugins/codesearch/index/`
+**Storage Location:** `/.opencode/plugin/codesearch/index/`
 
 **Index Structure:**
 
 ```
-/.opencode/plugins/codesearch/
+/.opencode/plugin/codesearch/
 ├── index/
 │   ├── items.json          # Vector embeddings + metadata
 │   ├── manifest.json       # Index metadata
@@ -176,7 +176,7 @@ Potential `opencode.json` configuration:
 
 ```json
 {
-  "plugins": {
+  "plugin": {
     "codesearch": {
       "model": "Xenova/jina-embeddings-v2-base-code",
       "embeddingDims": 512,
@@ -221,7 +221,7 @@ The plugin is successful if:
 2. **How to handle very large files (>10k lines)?**
    - Cap at first 5000 lines? Split into multiple logical units?
 3. **Should the index be per-project or global?**
-   - Per-project (in `<project>/.opencode/plugins/codesearch/`)
+   - Per-project (in `<project>/.opencode/plugin/codesearch/`)
    - Keeps indices isolated, easier to debug
 4. **What if the project doesn't have `.opencode/`?**
    - Create it automatically on first run
@@ -329,7 +329,7 @@ Combine vector similarity with keyword matching:
 For repos with >5000 files, shard by top-level directory:
 
 ```
-.opencode/plugins/codesearch/
+.opencode/plugin/codesearch/
 ├── shards/
 │   ├── src.json
 │   ├── lib.json
@@ -443,7 +443,7 @@ Match reasons:
 
 ### Plugin Hooks
 
-Emit events for other plugins to consume:
+Emit events for other plugin to consume:
 
 - `codesearch:indexed` - file was indexed
 - `codesearch:query` - search was performed

@@ -13,15 +13,14 @@ const plugin: Plugin = async (ctx) => {
   indexer
     .init()
     .then(async () => {
-      if (indexer!.isIndexed()) {
-        log.info('Index exists, skipping initial indexing');
-        return;
-      }
       indexing = true;
-      log.info('Starting initial index...');
+      log.info('Syncing index...');
       const result = await indexer!.indexProject();
-      log.info(`Indexed ${result.indexed} files (${result.skipped} unchanged)`);
+      log.info(`Sync complete: ${result.indexed} indexed, ${result.deleted} deleted`);
       indexing = false;
+
+      // Start live watcher
+      indexer!.watch();
     })
     .catch((err) => {
       log.error('Init failed', err.message);
@@ -30,7 +29,8 @@ const plugin: Plugin = async (ctx) => {
   return {
     tool: {
       codebase_search: tool({
-        description: 'Semantic search across the codebase using natural language queries',
+        description:
+          'Semantic search across the codebase using natural language queries. Use this tool as a first step to find relevant code snippets.',
         args: {
           query: tool.schema.string().describe('Natural language search query'),
           limit: tool.schema.number().optional().describe('Max results to return (default: 5)'),

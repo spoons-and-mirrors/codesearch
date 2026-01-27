@@ -9,7 +9,7 @@ let buffer: string[] = [];
 let scheduled = false;
 
 export function initLogger(projectDir: string): void {
-  const logDir = path.join(projectDir, '.opencode', 'plugins', 'codesearch');
+  const logDir = path.join(projectDir, '.opencode', 'plugin', 'codesearch');
   fs.mkdirSync(logDir, { recursive: true });
   logFile = path.join(logDir, 'codesearch.log');
 
