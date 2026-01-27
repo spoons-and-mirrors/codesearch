@@ -1,6 +1,6 @@
 import { pipeline, env, type FeatureExtractionPipeline } from '@xenova/transformers';
 import { log } from './logger';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
@@ -22,7 +22,6 @@ let loading: Promise<FeatureExtractionPipeline> | null = null;
 let failed = false;
 
 // Xenova's public fork of Jina code embeddings (no auth required)
-// Falls back to MiniLM if this fails
 const MODELS = [
   { name: 'Xenova/jina-embeddings-v2-small-en', dims: 512 },
   { name: 'Xenova/all-MiniLM-L6-v2', dims: 384 },
@@ -35,9 +34,10 @@ let providerLogged = false;
 const isGpuEnabled = process.env.OPENCODE_CODESEARCH_GPU === 'true';
 
 const gpuUrl = 'http://127.0.0.1:17373';
-const gpuTimeoutMs = 30000; // Increased to 30s to allow for model loading
+const gpuTimeoutMs = 30000; // Allow time for model loading
 const gpuHealthCacheMs = 15000;
 
+let gpuChild: ChildProcess | null = null;
 let gpuSpawned = false;
 let gpuStarting = false;
 let gpuLastCheck = 0;
@@ -156,8 +156,6 @@ async function getGpuStatus(): Promise<{ device?: string; dims?: number } | null
 
   await maybeStartGpuServer();
 
-  // If we just spawned it, wait a few seconds before the first health check
-  // as model loading can be heavy
   if (gpuStarting) {
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
@@ -192,22 +190,24 @@ async function maybeStartGpuServer(): Promise<void> {
   }
 
   gpuStarting = true;
-  const child = spawn(python, [scriptPath, '--host', host, '--port', port], {
+  gpuChild = spawn(python, [scriptPath, '--host', host, '--port', port], {
     stdio: 'ignore',
   });
 
-  child.on('error', (err) => {
+  gpuChild.on('error', (err) => {
     gpuStarting = false;
     gpuSpawned = false;
+    gpuChild = null;
     log.warn(`GPU server failed to start: ${err.message}`);
   });
 
-  child.on('exit', (code) => {
+  gpuChild.on('exit', (code) => {
     gpuStarting = false;
     if (!gpuSpawned) {
       log.warn(`GPU server exited early with code ${code}`);
     }
     gpuSpawned = false;
+    gpuChild = null;
   });
 
   gpuSpawned = true;
@@ -218,7 +218,6 @@ async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
   if (gpuDepsChecked) return gpuDepsReady ? (venvPythonPath || 'python3') : null;
   gpuDepsChecked = true;
 
-  // 1. Try system python first
   const systemCheck = await runPython('python3', ['-c', 'import fastapi,uvicorn,sentence_transformers,torch']);
   if (systemCheck.code === 0) {
     gpuDepsReady = true;
@@ -231,12 +230,10 @@ async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
     return null;
   }
 
-  // 2. Setup venv in a central location to avoid redownloading per-project
   const pythonExec = process.platform === 'win32' ? path.join(VENV_DIR, 'Scripts', 'python.exe') : path.join(VENV_DIR, 'bin', 'python3');
   
   if (!existsSync(VENV_DIR)) {
     log.info(`Creating central virtual environment in ${VENV_DIR}...`);
-    // Ensure parent dir exists
     const parent = path.dirname(VENV_DIR);
     if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
     
@@ -249,7 +246,6 @@ async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
   
   venvPythonPath = pythonExec;
 
-  // 3. Ensure pip in venv
   const pipCheck = await runPython(pythonExec, ['-m', 'pip', '--version']);
   if (pipCheck.code !== 0) {
     log.info('Bootstrapping pip in virtual environment...');
@@ -257,7 +253,6 @@ async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
     if (!bootstrapped) return null;
   }
 
-  // 4. Install requirements
   const requirements = path.resolve(path.dirname(scriptPath), 'requirements-gpu.txt');
   log.info('Installing GPU embedding dependencies in venv (this can take 5-10 minutes)...');
   const install = await runPython(pythonExec, ['-m', 'pip', 'install', '-r', requirements], true);
@@ -372,6 +367,19 @@ async function fetchJson(
     clearTimeout(timeout);
   }
 }
+
+// Cleanup: ensure the child process is killed when the main process exits
+const cleanup = () => {
+  if (gpuChild) {
+    log.info('Shutting down GPU embedding server...');
+    gpuChild.kill();
+    gpuChild = null;
+  }
+};
+
+process.on('exit', cleanup);
+process.on('SIGINT', () => { cleanup(); process.exit(); });
+process.on('SIGTERM', () => { cleanup(); process.exit(); });
 
 export function getDims(): number {
   return activeDims;
