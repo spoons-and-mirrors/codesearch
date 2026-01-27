@@ -1,5 +1,5 @@
 import { LocalIndex } from 'vectra';
-import { embed } from './embed';
+import { embed, embedMany } from './embed';
 import { log } from './logger';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -32,6 +32,10 @@ const EXCLUDE_DIRS = new Set([
 ]);
 const CHUNK_SIZE = 2000;
 const OVERLAP = 200;
+const EMBED_BATCH_SIZE = Math.max(
+  1,
+  Number.parseInt(process.env.CODESEARCH_EMBEDDINGS_BATCH_SIZE || '16', 10) || 16
+);
 
 interface ChunkMeta {
   filePath: string;
@@ -125,11 +129,16 @@ export class CodeIndexer {
 
     const chunks = this.chunkContent(content, filePath, hash);
     let indexed = 0;
-    for (const chunk of chunks) {
-      const vector = await embed(chunk.content);
-      if (!vector) continue;
-      await this.index.insertItem({ vector, metadata: chunk });
-      indexed++;
+    for (let i = 0; i < chunks.length; i += EMBED_BATCH_SIZE) {
+      const batch = chunks.slice(i, i + EMBED_BATCH_SIZE);
+      const vectors = await embedMany(batch.map((chunk) => chunk.content));
+
+      for (let j = 0; j < batch.length; j++) {
+        const vector = vectors[j];
+        if (!vector) continue;
+        await this.index.insertItem({ vector, metadata: batch[j] });
+        indexed++;
+      }
     }
     log.debug(`Indexed ${filePath} (${indexed}/${chunks.length} chunks)`);
   }
