@@ -35,7 +35,7 @@ let providerLogged = false;
 const isGpuEnabled = process.env.OPENCODE_CODESEARCH_GPU === 'true';
 
 const gpuUrl = 'http://127.0.0.1:17373';
-const gpuTimeoutMs = 8000;
+const gpuTimeoutMs = 30000; // Increased to 30s to allow for model loading
 const gpuHealthCacheMs = 15000;
 
 let gpuSpawned = false;
@@ -155,6 +155,12 @@ async function getGpuStatus(): Promise<{ device?: string; dims?: number } | null
   }
 
   await maybeStartGpuServer();
+
+  // If we just spawned it, wait a few seconds before the first health check
+  // as model loading can be heavy
+  if (gpuStarting) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
 
   const response = await fetchJson(`${gpuUrl}/health`, { method: 'GET' });
   if (!response) return null;

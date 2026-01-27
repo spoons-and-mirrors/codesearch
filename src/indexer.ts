@@ -83,6 +83,19 @@ export class CodeIndexer {
 
   async indexProject(): Promise<{ indexed: number; skipped: number; deleted: number }> {
     const files = this.collectFiles(this.projectRoot);
+    const allKnown = new Set(files.map(f => path.relative(this.projectRoot, f)));
+    
+    // List all files in current project for debug
+    const entries = fs.readdirSync(this.projectRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        const rel = entry.name;
+        if (!allKnown.has(rel) && !EXCLUDE_DIRS.has(rel) && !rel.startsWith('.')) {
+          log.debug(`Skipping file (unsupported extension): ${rel}`);
+        }
+      }
+    }
+
     const relFiles = new Set(files.map((f) => path.relative(this.projectRoot, f)));
     let indexed = 0;
     let skipped = 0;
