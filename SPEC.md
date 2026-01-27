@@ -229,10 +229,229 @@ The plugin is successful if:
 
 ## Future Enhancements (v2+)
 
-- **Hybrid search:** Combine semantic + keyword (BM25)
-- **Code structure awareness:** Use AST to chunk by function/class
-- **Cross-file context:** Link related code across files
-- **Personalization:** Learn from user's search patterns
-- **Explanation:** Show why a result matched the query
-- **Performance mode:** Switch to hnswlib-node for large codebases
-- **GPU support:** Detect GPU and use faster inference
+### Configuration File Support
+
+Add `codesearch.config.json` in project root or `~/.config/opencode/plugin/codesearch/`:
+
+```json
+{
+  "model": "jina-small" | "jina-base" | "minilm" | "custom",
+  "customModel": "Xenova/your-model-here",
+  "dimensions": 512,
+  "chunkSize": 2000,
+  "chunkOverlap": 200,
+  "maxResults": 10,
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/fixtures/**",
+    "**/mocks/**",
+    "vendor/**"
+  ],
+  "include": ["src/**", "lib/**"],
+  "extensions": [".ts", ".tsx", ".js", ".py", ".go", ".rs"],
+  "indexTestFiles": false,
+  "maxFileSize": 100000,
+  "watchMode": true,
+  "logLevel": "info" | "debug" | "error"
+}
+```
+
+### Reindex Command
+
+Expose a `/reindex` slash command or tool to force full reindex:
+
+- `codebase_reindex()` - wipe and rebuild entire index
+- `codebase_reindex({ path: "src/auth" })` - reindex specific directory
+- Show progress: "Reindexing... 150/300 files"
+
+### Index Statistics Tool
+
+`codebase_stats()` returns:
+
+```json
+{
+  "totalFiles": 342,
+  "totalChunks": 1847,
+  "indexSize": "2.3MB",
+  "lastFullIndex": "2026-01-27T19:00:00Z",
+  "modelLoaded": "jina-small",
+  "dimensions": 512,
+  "topDirectories": [
+    { "path": "src/", "chunks": 1200 },
+    { "path": "lib/", "chunks": 400 }
+  ]
+}
+```
+
+### File Watching (Live Index)
+
+Use `chokidar` or Bun's native `watch()` for real-time updates:
+
+- Watch for file changes in included paths
+- Debounce rapid changes (100ms)
+- Queue updates, process in background
+- Log: "Updated index: src/auth/login.ts (3 chunks)"
+
+### AST-Aware Chunking
+
+Instead of naive line-based chunking, parse code structure:
+
+- Chunk by function/method boundaries
+- Chunk by class definitions
+- Preserve import statements with each chunk
+- Store function signatures as metadata for better matching
+
+Example metadata:
+
+```json
+{
+  "filePath": "src/auth.ts",
+  "type": "function",
+  "name": "validateToken",
+  "signature": "async validateToken(token: string): Promise<User | null>",
+  "startLine": 45,
+  "endLine": 72
+}
+```
+
+### Hybrid Search (Semantic + Keyword)
+
+Combine vector similarity with keyword matching:
+
+1. Run semantic search (top 20 candidates)
+2. Re-rank with BM25 keyword score
+3. Boost exact matches (function names, variable names)
+4. Final score = `0.7 * semantic + 0.3 * keyword`
+
+### Sharded Index for Large Repos
+
+For repos with >5000 files, shard by top-level directory:
+
+```
+.opencode/plugins/codesearch/
+├── shards/
+│   ├── src.json
+│   ├── lib.json
+│   ├── packages.json
+│   └── apps.json
+├── manifest.json      # shard metadata
+└── state.json
+```
+
+Query all shards in parallel, merge results.
+
+### External Embedding APIs
+
+Support cloud embedding APIs as alternative to local models:
+
+```json
+{
+  "embeddings": {
+    "provider": "openai" | "cohere" | "voyage" | "local",
+    "model": "text-embedding-3-small",
+    "apiKey": "${OPENAI_API_KEY}",
+    "batchSize": 100
+  }
+}
+```
+
+Benefits: faster, higher quality, but requires API key and has cost.
+
+### Query Understanding
+
+Pre-process queries to improve results:
+
+- Expand abbreviations: "auth" → "authentication"
+- Detect intent: "how does X work" → search for X implementation
+- Code pattern detection: "useState hook" → boost React files
+- Language hints: "python logging" → boost .py files
+
+### Result Caching
+
+Cache recent queries to avoid re-embedding:
+
+```json
+{
+  "queryCache": {
+    "maxSize": 100,
+    "ttl": 3600
+  }
+}
+```
+
+LRU cache with configurable size and TTL.
+
+### Multi-Project Index
+
+Global index mode for monorepos or multiple related projects:
+
+```
+~/.cache/codesearch/
+├── projects.json
+├── project-a/
+│   └── index/
+├── project-b/
+│   └── index/
+└── global-search.json  # cross-project metadata
+```
+
+### Search Filters
+
+Extend tool with filter options:
+
+```json
+{
+  "query": "error handling",
+  "limit": 5,
+  "filters": {
+    "path": "src/api/**",
+    "extension": [".ts", ".tsx"],
+    "exclude": ["*.test.ts"],
+    "minScore": 0.5,
+    "after": "2026-01-01"
+  }
+}
+```
+
+### Explanation Mode
+
+Show why a result matched:
+
+```
+## src/auth/login.ts:45-72 (score: 0.87)
+Match reasons:
+- High similarity to "authentication"
+- Contains "validateToken" function
+- References "user" and "session"
+```
+
+### Git-Aware Indexing
+
+- Respect `.gitignore` patterns
+- Option to only index tracked files
+- Diff-based reindex: only re-embed changed lines after git pull
+- Blame integration: "who wrote this code?"
+
+### Performance Optimizations
+
+- **Model preloading**: Load model during OpenCode startup, not first query
+- **Batch embedding**: Embed multiple chunks in one model call
+- **Index compression**: gzip the JSON index files
+- **Memory mapping**: mmap large indices instead of loading to RAM
+- **HNSW upgrade**: Switch to `hnswlib-node` for O(log n) search
+
+### Plugin Hooks
+
+Emit events for other plugins to consume:
+
+- `codesearch:indexed` - file was indexed
+- `codesearch:query` - search was performed
+- `codesearch:result` - results were returned
+
+### Security Considerations
+
+- Never index `.env`, `credentials.json`, `*.pem`, etc.
+- Configurable secrets detection
+- Option to encrypt index at rest
+- Audit log for searches (optional)
