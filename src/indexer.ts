@@ -5,6 +5,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
+//.. testdffsdsdsd
+
 const EXTENSIONS = new Set([
   '.ts',
   '.tsx',
@@ -17,7 +19,6 @@ const EXTENSIONS = new Set([
   '.cpp',
   '.c',
   '.h',
-  '.hpp',
   '.md',
 ]);
 const EXCLUDE_DIRS = new Set([
@@ -56,13 +57,13 @@ export class CodeIndexer {
 
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
-    this.indexDir = path.join(projectRoot, '.opencode', 'plugin', 'codesearch', 'index');
-    this.stateFile = path.join(projectRoot, '.opencode', 'plugin', 'codesearch', 'state.json');
+    this.indexDir = path.join(projectRoot, '.opencode', 'plugin', 'codesearch');
+    this.stateFile = path.join(this.indexDir, 'state.json');
     this.index = new LocalIndex(this.indexDir);
   }
 
   async init(): Promise<void> {
-    fs.mkdirSync(path.dirname(this.indexDir), { recursive: true });
+    fs.mkdirSync(this.indexDir, { recursive: true });
     if (!(await this.index.isIndexCreated())) {
       await this.index.createIndex();
     }
@@ -216,6 +217,9 @@ export class CodeIndexer {
     fs.watch(this.projectRoot, { recursive: true }, async (event, filename) => {
       try {
         if (!filename) return;
+
+        // Skip internal plugin state changes to avoid infinite loops
+        if (filename.startsWith('.opencode')) return;
 
         // Skip excluded paths
         const parts = filename.split(path.sep);

@@ -8,6 +8,7 @@ let indexing = false;
 
 const plugin: Plugin = async (ctx) => {
   initLogger(ctx.directory);
+  log.info(`CodeSearch starting in: ${ctx.directory}`);
   indexer = new CodeIndexer(ctx.directory);
 
   indexer
