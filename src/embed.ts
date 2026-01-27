@@ -1,6 +1,14 @@
 import { pipeline, env, type FeatureExtractionPipeline } from '@xenova/transformers';
 import { log } from './logger';
 
+// Silence transformers.js internal console warnings
+const origWarn = console.warn;
+console.warn = (...args: unknown[]) => {
+  const msg = String(args[0] || '');
+  if (msg.includes('Unable to determine') || msg.includes('context size')) return;
+  origWarn.apply(console, args);
+};
+
 // Allow both local cache and remote
 env.allowLocalModels = true;
 env.allowRemoteModels = true;
