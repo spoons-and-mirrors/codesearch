@@ -1,45 +1,46 @@
 # CodeSearch Plugin
 
-Semantic codebase search for OpenCode. It builds a local vector index and exposes a single tool: `codebase_search`.
+Semantic codebase search for OpenCode. This plugin builds a local vector index of your project, enabling natural language search through a single tool: `codebase_search`.
 
-## What it does
-- **Automatic Indexing**: Indexes your project on startup and keeps it in sync using a background watcher.
-- **Hybrid Embeddings**: Uses fast CPU embeddings by default (Transformers.js) and can automatically scale to a local GPU if available.
-- **Zero Configuration**: Automatically handles its own Python virtual environment and dependencies.
+## Features
+
+- **Semantic Search**: Find code by meaning, not just keywords (e.g., "how do we handle auth?").
+- **Automatic Indexing**: Background indexing on startup with incremental updates via filesystem watching.
+- **Hybrid Embedding Engine**: Uses fast, local CPU embeddings by default (Transformers.js) with optional automatic local GPU acceleration (Python/Torch).
+- **Zero-Config Storage**: All index data and logs are stored within the project's `.opencode/` directory.
 
 ## Usage
-Start OpenCode as usual. The plugin indexes in the background. You can then use the `codebase_search` tool:
+
+Once installed, the `codebase_search` tool becomes available in OpenCode.
 
 ```json
-codebase_search({"query": "where is the embedding logic?", "limit": 5})
+{
+  "query": "database connection logic",
+  "limit": 5
+}
 ```
 
----
+### Supported Languages
+`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.rs`, `.java`, `.cpp`, `.c`, `.h`, `.md`
 
-## Local GPU Embeddings (Opt-in)
-By default, this plugin uses **CPU-only embeddings** (Transformers.js) which are lightweight and require no extra setup.
+## Configuration
 
-To enable **hardware acceleration (GPU)**:
-- Set `OPENCODE_CODESEARCH_GPU=true`
+### Local GPU Acceleration (Optional)
+To enable hardware-accelerated embeddings, set the following environment variable:
 
-### 🚀 GPU Auto-Setup
-When opted-in, the plugin will:
-1.  **Global Virtual Environment**: Create a central folder at `~/.local/share/opencode/storage/plugin/codesearch/gpu/venv`.
-2.  **Auto-Bootstrap**: Install `pip`, `fastapi`, `uvicorn`, `sentence-transformers`, and `torch`.
+`OPENCODE_CODESEARCH_GPU=true`
 
-> [!IMPORTANT]
-> **First run takes 5-10 minutes.**
-> The GPU dependencies (specifically `torch`) are large (~1GB+). The plugin will stream the installation progress to your logs with the `[pip]` prefix. **Do not close the application during this process.**
+**Note:** On first run with GPU enabled, the plugin will bootstrap a dedicated Python virtual environment and download `torch` and `sentence-transformers` (~1.5GB). This process happens in the background.
 
----
+## Technical Details
+
+- **Embedding Model**: `jina-embeddings-v2-base-code` (via Xenova/Transformers.js or Python).
+- **Vector DB**: `vectra` (Local JSON-based storage).
+- **Storage Path**: `<project_root>/.opencode/plugin/codesearch/`
+- **Chunking**: Semantic chunking with overlap (~2000 chars per chunk).
 
 ## Troubleshooting
-- **Stuck on "Installing..."**: Check your internet connection and disk space. The download is ~1.5GB total.
-- **CPU Fallback**: If GPU setup fails, the plugin will log the error and fallback to CPU embeddings automatically so you can still search.
-- **Indexer Noise**: The plugin ignores `node_modules`, `.git`, and its own `.venv-gpu` directory automatically.
 
-## Files
-- `src/index.ts`: Plugin entry point and tool definition.
-- `src/indexer.ts`: File watching and vector database sync.
-- `src/embed.ts`: Provider logic (Transformers.js vs Python Sidecar).
-- `scripts/gpu_embeddings_server.py`: The Python sidecar for GPU acceleration.
+- **Logs**: Detailed logs are available at `.opencode/plugin/codesearch/codesearch.log`.
+- **Reindexing**: If the index becomes out of sync, delete the `.opencode/plugin/codesearch/` directory and restart OpenCode.
+- **Exclusions**: By default, `node_modules`, `.git`, `dist`, `build`, and test files are ignored.
