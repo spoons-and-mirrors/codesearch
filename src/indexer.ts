@@ -29,6 +29,11 @@ const EXCLUDE_DIRS = new Set([
   '.opencode',
   '.next',
   'vendor',
+  '.venv-gpu',
+  '.venv',
+  'venv',
+  'env',
+  '.env',
 ]);
 const CHUNK_SIZE = 2000;
 const OVERLAP = 200;

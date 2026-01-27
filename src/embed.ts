@@ -3,6 +3,7 @@ import { log } from './logger';
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 
 // Silence transformers.js internal console warnings
 const origWarn = console.warn;
@@ -30,24 +31,12 @@ const MODELS = [
 let activeDims = 512;
 let providerLogged = false;
 
-type ProviderPreference = 'auto' | 'local' | 'local-gpu';
+// SINGLE CONFIG VARIABLE
+const isGpuEnabled = process.env.OPENCODE_CODESEARCH_GPU === 'true';
 
-const providerPreference = (process.env.CODESEARCH_EMBEDDINGS_PROVIDER || 'auto')
-  .toLowerCase()
-  .trim() as ProviderPreference;
-const gpuUrl = process.env.CODESEARCH_EMBEDDINGS_GPU_URL || 'http://127.0.0.1:17373';
-const gpuStartEnabled = process.env.CODESEARCH_EMBEDDINGS_GPU_START !== 'false';
-const gpuTimeoutMsRaw = Number.parseInt(
-  process.env.CODESEARCH_EMBEDDINGS_GPU_TIMEOUT_MS || '8000',
-  10
-);
-const gpuTimeoutMs = Number.isFinite(gpuTimeoutMsRaw) ? gpuTimeoutMsRaw : 8000;
-const gpuAutoInstall = process.env.CODESEARCH_EMBEDDINGS_GPU_AUTO_INSTALL !== 'false';
-const gpuHealthCacheMsRaw = Number.parseInt(
-  process.env.CODESEARCH_EMBEDDINGS_GPU_HEALTH_CACHE_MS || '15000',
-  10
-);
-const gpuHealthCacheMs = Number.isFinite(gpuHealthCacheMsRaw) ? gpuHealthCacheMsRaw : 15000;
+const gpuUrl = 'http://127.0.0.1:17373';
+const gpuTimeoutMs = 8000;
+const gpuHealthCacheMs = 15000;
 
 let gpuSpawned = false;
 let gpuStarting = false;
@@ -55,6 +44,10 @@ let gpuLastCheck = 0;
 let gpuDevice: string | null = null;
 let gpuDepsChecked = false;
 let gpuDepsReady = false;
+let venvPythonPath: string | null = null;
+
+const home = process.env.HOME || process.env.USERPROFILE || process.cwd();
+const VENV_DIR = path.resolve(home, '.local', 'share', 'opencode', 'storage', 'plugin', 'codesearch', 'gpu', 'venv');
 
 export async function getExtractor(): Promise<FeatureExtractionPipeline | null> {
   if (failed) return null;
@@ -99,9 +92,7 @@ export async function embedMany(texts: string[]): Promise<Array<number[] | null>
   if (await shouldUseGpu()) {
     const remote = await embedGpu(texts);
     if (remote) return remote;
-    if (providerPreference === 'local-gpu') {
-      log.warn('GPU embeddings failed, falling back to local model');
-    }
+    log.warn('GPU embeddings failed, falling back to local model');
   }
 
   return embedLocal(texts);
@@ -151,12 +142,10 @@ async function embedGpu(texts: string[]): Promise<Array<number[] | null> | null>
 }
 
 async function shouldUseGpu(): Promise<boolean> {
-  if (providerPreference === 'local') return false;
+  if (!isGpuEnabled) return false;
   const status = await getGpuStatus();
   if (!status) return false;
-  if (providerPreference === 'local-gpu') return true;
-  const device = (status.device || '').toLowerCase();
-  return device !== '' && device !== 'cpu';
+  return true;
 }
 
 async function getGpuStatus(): Promise<{ device?: string; dims?: number } | null> {
@@ -178,14 +167,13 @@ async function getGpuStatus(): Promise<{ device?: string; dims?: number } | null
 }
 
 async function maybeStartGpuServer(): Promise<void> {
-  if (!gpuStartEnabled || gpuSpawned || gpuStarting) return;
-  if (providerPreference === 'local') return;
+  if (!isGpuEnabled || gpuSpawned || gpuStarting) return;
 
   const scriptPath = resolveGpuServerPath();
   if (!scriptPath) return;
 
-  const depsReady = await ensureGpuDeps(scriptPath);
-  if (!depsReady) return;
+  const python = await ensureGpuDeps(scriptPath);
+  if (!python) return;
 
   let host = '127.0.0.1';
   let port = '17373';
@@ -198,7 +186,7 @@ async function maybeStartGpuServer(): Promise<void> {
   }
 
   gpuStarting = true;
-  const child = spawn('python3', [scriptPath, '--host', host, '--port', port], {
+  const child = spawn(python, [scriptPath, '--host', host, '--port', port], {
     stdio: 'ignore',
   });
 
@@ -220,46 +208,131 @@ async function maybeStartGpuServer(): Promise<void> {
   gpuStarting = false;
 }
 
-async function ensureGpuDeps(scriptPath: string): Promise<boolean> {
-  if (gpuDepsChecked) return gpuDepsReady;
-
+async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
+  if (gpuDepsChecked) return gpuDepsReady ? (venvPythonPath || 'python3') : null;
   gpuDepsChecked = true;
 
-  const importCheck = await runPython(['-c', 'import fastapi,uvicorn,sentence_transformers,torch']);
-  if (importCheck === 0) {
+  // 1. Try system python first
+  const systemCheck = await runPython('python3', ['-c', 'import fastapi,uvicorn,sentence_transformers,torch']);
+  if (systemCheck.code === 0) {
     gpuDepsReady = true;
-    return true;
+    return 'python3';
   }
 
-  if (!gpuAutoInstall) {
-    log.warn('GPU deps missing; set CODESEARCH_EMBEDDINGS_GPU_AUTO_INSTALL=true to install');
+  if (!isGpuEnabled) {
+    log.warn('GPU deps missing; set OPENCODE_CODESEARCH_GPU=true to enable GPU support');
     gpuDepsReady = false;
-    return false;
+    return null;
   }
 
+  // 2. Setup venv in a central location to avoid redownloading per-project
+  const pythonExec = process.platform === 'win32' ? path.join(VENV_DIR, 'Scripts', 'python.exe') : path.join(VENV_DIR, 'bin', 'python3');
+  
+  if (!existsSync(VENV_DIR)) {
+    log.info(`Creating central virtual environment in ${VENV_DIR}...`);
+    // Ensure parent dir exists
+    const parent = path.dirname(VENV_DIR);
+    if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
+    
+    const venvResult = await runPython('python3', ['-m', 'venv', VENV_DIR, '--without-pip']);
+    if (venvResult.code !== 0) {
+      log.warn(`Failed to create venv: ${venvResult.output}`);
+      return null;
+    }
+  }
+  
+  venvPythonPath = pythonExec;
+
+  // 3. Ensure pip in venv
+  const pipCheck = await runPython(pythonExec, ['-m', 'pip', '--version']);
+  if (pipCheck.code !== 0) {
+    log.info('Bootstrapping pip in virtual environment...');
+    const bootstrapped = await bootstrapPip(pythonExec);
+    if (!bootstrapped) return null;
+  }
+
+  // 4. Install requirements
   const requirements = path.resolve(path.dirname(scriptPath), 'requirements-gpu.txt');
-  log.info('Installing GPU embedding dependencies...');
-  const install = await runPython(['-m', 'pip', 'install', '-r', requirements]);
-  if (install !== 0) {
-    log.warn('GPU deps install failed; falling back to local model');
-    gpuDepsReady = false;
-    return false;
+  log.info('Installing GPU embedding dependencies in venv (this can take 5-10 minutes)...');
+  const install = await runPython(pythonExec, ['-m', 'pip', 'install', '-r', requirements], true);
+  
+  if (install.code !== 0) {
+    log.warn(`GPU deps install failed (exit ${install.code}): ${install.output.slice(0, 500)}`);
+    return null;
   }
 
-  const recheck = await runPython(['-c', 'import fastapi,uvicorn,sentence_transformers,torch']);
-  gpuDepsReady = recheck === 0;
-  if (!gpuDepsReady) {
-    log.warn('GPU deps still missing after install; falling back to local model');
-  }
-
-  return gpuDepsReady;
+  const finalCheck = await runPython(pythonExec, ['-c', 'import fastapi,uvicorn,sentence_transformers,torch']);
+  gpuDepsReady = finalCheck.code === 0;
+  return gpuDepsReady ? pythonExec : null;
 }
 
-async function runPython(args: string[]): Promise<number> {
+async function bootstrapPip(pythonExec: string): Promise<boolean> {
+  const getPipUrl = 'https://bootstrap.pypa.io/get-pip.py';
+  const tempPath = path.resolve(VENV_DIR, 'get-pip-temp.py');
+
+  try {
+    if (!existsSync(VENV_DIR)) mkdirSync(VENV_DIR, { recursive: true });
+    log.info('Downloading get-pip.py...');
+    const response = await fetch(getPipUrl);
+    if (!response.ok) throw new Error(`Download failed: ${response.statusText}`);
+    const content = await response.text();
+    writeFileSync(tempPath, content);
+
+    log.info('Running get-pip.py in venv...');
+    const result = await runPython(pythonExec, [tempPath]);
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+
+    if (result.code !== 0) {
+      log.warn(`get-pip.py failed (exit ${result.code}): ${result.output.slice(0, 500)}`);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    log.warn(`Failed to bootstrap pip: ${(err as Error).message}`);
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+    return false;
+  }
+}
+
+async function runPython(
+  pythonExec: string,
+  args: string[],
+  streamToLog = false
+): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn('python3', args, { stdio: 'ignore' });
-    child.on('error', () => resolve(1));
-    child.on('exit', (code) => resolve(code ?? 1));
+    const child = spawn(pythonExec, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+
+    child.stdout.on('data', (chunk) => {
+      const str = chunk.toString();
+      output += str;
+      if (streamToLog) {
+        const lines = str.split('\n');
+        for (const line of lines) {
+          if (line.trim()) log.info(`[pip] ${line.trim()}`);
+        }
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      const str = chunk.toString();
+      output += str;
+      if (streamToLog) {
+        const lines = str.split('\n');
+        for (const line of lines) {
+          if (line.trim()) log.info(`[pip-err] ${line.trim()}`);
+        }
+      }
+    });
+
+    child.on('error', (err) => {
+      resolve({ code: 127, output: err.message });
+    });
+
+    child.on('exit', (code) => {
+      resolve({ code: code ?? 1, output: output.trim() });
+    });
   });
 }
 
@@ -285,7 +358,7 @@ async function fetchJson(
     if (!response.ok) return null;
     return (await response.json()) as Record<string, any>;
   } catch (err) {
-    if (providerPreference === 'local-gpu') {
+    if (isGpuEnabled) {
       log.warn('GPU embeddings request failed', (err as Error).message);
     }
     return null;
