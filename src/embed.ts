@@ -27,7 +27,7 @@ const MODELS = [
   { name: 'Xenova/all-MiniLM-L6-v2', dims: 384 },
 ];
 
-let activeDims = 512;
+let activeDims: number | null = null;
 let providerLogged = false;
 
 // SINGLE CONFIG VARIABLE
@@ -55,6 +55,10 @@ export async function getExtractor(): Promise<FeatureExtractionPipeline | null> 
   if (loading) return loading;
 
   for (const model of MODELS) {
+    if (activeDims !== null && model.dims !== activeDims) {
+      log.debug(`Skipping local model ${model.name} due to dimension mismatch (expected ${activeDims}, got ${model.dims})`);
+      continue;
+    }
     log.info(`Trying model: ${model.name}`);
     try {
       loading = pipeline('feature-extraction', model.name, {
@@ -66,7 +70,9 @@ export async function getExtractor(): Promise<FeatureExtractionPipeline | null> 
         },
       });
       extractor = await loading;
-      activeDims = model.dims;
+      if (activeDims === null) {
+        activeDims = model.dims;
+      }
       log.info(`Model loaded: ${model.name} (${model.dims} dims)`);
       loading = null;
       return extractor;
@@ -106,10 +112,11 @@ async function embedLocal(texts: string[]): Promise<Array<number[] | null>> {
     const output = await ext(texts, { pooling: 'mean', normalize: true });
     const data = output.data as Float32Array;
     const results: Array<number[] | null> = [];
+    const dims = data.length / texts.length;
 
     for (let i = 0; i < texts.length; i++) {
-      const start = i * activeDims;
-      const slice = data.slice(start, start + activeDims);
+      const start = i * dims;
+      const slice = data.slice(start, start + dims);
       results.push(Array.from(slice));
     }
 
@@ -131,13 +138,19 @@ async function embedGpu(texts: string[]): Promise<Array<number[] | null> | null>
   const embeddings = Array.isArray(response.embeddings) ? response.embeddings : [];
   if (embeddings.length === 0) return null;
 
+  const dims = Number.isFinite(response.dims) ? response.dims : embeddings[0]?.length;
+  if (activeDims === null && dims) {
+    activeDims = dims;
+  } else if (activeDims !== null && dims && dims !== activeDims) {
+    log.warn(`GPU embedding dimension mismatch: expected ${activeDims}, got ${dims}`);
+    return null;
+  }
+
   if (!providerLogged) {
     log.info(`Using local GPU embeddings: ${response.device || 'unknown'} (${gpuUrl})`);
     providerLogged = true;
   }
 
-  const dims = Number.isFinite(response.dims) ? response.dims : embeddings[0]?.length;
-  if (dims) activeDims = dims;
   return embeddings;
 }
 
@@ -157,11 +170,34 @@ async function getGpuStatus(): Promise<{ device?: string; dims?: number } | null
   await maybeStartGpuServer();
 
   if (gpuStarting) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Wait for server to become healthy (up to 60s for model loading)
+    const start = Date.now();
+    while (Date.now() - start < 60000) {
+      const response = await fetchJson(`${gpuUrl}/health`, { method: 'GET' }, true);
+      if (response) {
+        gpuStarting = false;
+        gpuDevice = response.device || 'unknown';
+        gpuLastCheck = Date.now();
+        log.info(`GPU server ready: ${gpuDevice} (${response.model})`);
+        return response;
+      }
+      if (!gpuChild) {
+        gpuStarting = false;
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    gpuStarting = false;
+    log.warn('GPU server failed to become healthy within 60s');
+    return null;
   }
 
   const response = await fetchJson(`${gpuUrl}/health`, { method: 'GET' });
-  if (!response) return null;
+  if (!response) {
+    // If we can't reach a "ready" server, back off for a bit
+    gpuLastCheck = now;
+    return null;
+  }
 
   if (typeof response.device === 'string') {
     gpuDevice = response.device;
@@ -172,6 +208,16 @@ async function getGpuStatus(): Promise<{ device?: string; dims?: number } | null
 
 async function maybeStartGpuServer(): Promise<void> {
   if (!isGpuEnabled || gpuSpawned || gpuStarting) return;
+
+  // Check if someone is already listening on this port
+  const existing = await fetchJson(`${gpuUrl}/health`, { method: 'GET' }, true);
+  if (existing) {
+    log.info(`GPU server already running: ${existing.device} (${existing.model})`);
+    gpuSpawned = true;
+    gpuDevice = existing.device;
+    if (activeDims === null && existing.dims) activeDims = existing.dims;
+    return;
+  }
 
   const scriptPath = resolveGpuServerPath();
   if (!scriptPath) return;
@@ -191,7 +237,21 @@ async function maybeStartGpuServer(): Promise<void> {
 
   gpuStarting = true;
   gpuChild = spawn(python, [scriptPath, '--host', host, '--port', port], {
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  gpuChild.stdout?.on('data', (chunk) => {
+    const lines = chunk.toString().split('\n');
+    for (const line of lines) {
+      if (line.trim()) log.info(`[gpu-server] ${line.trim()}`);
+    }
+  });
+
+  gpuChild.stderr?.on('data', (chunk) => {
+    const lines = chunk.toString().split('\n');
+    for (const line of lines) {
+      if (line.trim()) log.info(`[gpu-server-err] ${line.trim()}`);
+    }
   });
 
   gpuChild.on('error', (err) => {
@@ -203,15 +263,15 @@ async function maybeStartGpuServer(): Promise<void> {
 
   gpuChild.on('exit', (code) => {
     gpuStarting = false;
-    if (!gpuSpawned) {
-      log.warn(`GPU server exited early with code ${code}`);
+    if (gpuSpawned && code !== 0 && code !== null) {
+      log.warn(`GPU server exited unexpectedly with code ${code}`);
     }
     gpuSpawned = false;
     gpuChild = null;
   });
 
   gpuSpawned = true;
-  gpuStarting = false;
+  // Keep gpuStarting = true, getGpuStatus will flip it after successful health check or timeout
 }
 
 async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
@@ -255,7 +315,12 @@ async function ensureGpuDeps(scriptPath: string): Promise<string | null> {
 
   const requirements = path.resolve(path.dirname(scriptPath), 'requirements-gpu.txt');
   log.info('Installing GPU embedding dependencies in venv (this can take 5-10 minutes)...');
-  const install = await runPython(pythonExec, ['-m', 'pip', 'install', '-r', requirements], true);
+  const install = await runPython(
+    pythonExec,
+    ['-m', 'pip', 'install', '-r', requirements],
+    true,
+    { PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1' }
+  );
   
   if (install.code !== 0) {
     log.warn(`GPU deps install failed (exit ${install.code}): ${install.output.slice(0, 500)}`);
@@ -299,10 +364,14 @@ async function bootstrapPip(pythonExec: string): Promise<boolean> {
 async function runPython(
   pythonExec: string,
   args: string[],
-  streamToLog = false
+  streamToLog = false,
+  envVars: Record<string, string> = {}
 ): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn(pythonExec, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(pythonExec, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...envVars },
+    });
     let output = '';
 
     child.stdout.on('data', (chunk) => {
@@ -349,7 +418,8 @@ function resolveGpuServerPath(): string | null {
 
 async function fetchJson(
   url: string,
-  options: RequestInit
+  options: RequestInit,
+  silent = false
 ): Promise<Record<string, any> | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), gpuTimeoutMs);
@@ -359,7 +429,7 @@ async function fetchJson(
     if (!response.ok) return null;
     return (await response.json()) as Record<string, any>;
   } catch (err) {
-    if (isGpuEnabled) {
+    if (isGpuEnabled && !silent) {
       log.warn('GPU embeddings request failed', (err as Error).message);
     }
     return null;
@@ -381,6 +451,14 @@ process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(); });
 process.on('SIGTERM', () => { cleanup(); process.exit(); });
 
+export async function prepare(): Promise<void> {
+  if (isGpuEnabled) {
+    await getGpuStatus();
+  } else {
+    await getExtractor();
+  }
+}
+
 export function getDims(): number {
-  return activeDims;
+  return activeDims ?? 512;
 }

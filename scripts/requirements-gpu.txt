@@ -1,4 +1,6 @@
 fastapi
 uvicorn
-sentence-transformers
+sentence-transformers>=3.0.1
+transformers>=4.45.0,<5.0.0
 torch
+einops

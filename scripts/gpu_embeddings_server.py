@@ -29,7 +29,7 @@ def pick_device() -> str:
 
 
 DEVICE = pick_device()
-MODEL = SentenceTransformer(DEFAULT_MODEL, device=DEVICE)
+MODEL = SentenceTransformer(DEFAULT_MODEL, device=DEVICE, trust_remote_code=True)
 DIMS = MODEL.get_sentence_embedding_dimension()
 
 app = FastAPI()

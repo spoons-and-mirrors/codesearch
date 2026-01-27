@@ -1,11 +1,9 @@
 import { LocalIndex } from 'vectra';
-import { embed, embedMany } from './embed';
+import { embed, embedMany, getDims, prepare } from './embed';
 import { log } from './logger';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-
-//.. testdffsdsdsd
 
 const EXTENSIONS = new Set([
   '.ts',
@@ -55,6 +53,7 @@ interface ChunkMeta {
 interface StateFile {
   hashes: Record<string, string>;
   lastIndexed: number;
+  dimension?: number;
 }
 
 export class CodeIndexer {
@@ -73,11 +72,32 @@ export class CodeIndexer {
 
   async init(): Promise<void> {
     fs.mkdirSync(this.indexDir, { recursive: true });
+    await prepare();
+    
+    if (fs.existsSync(this.stateFile)) {
+      try {
+        this.state = JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'));
+      } catch (err) {
+        log.warn('Failed to read state file, starting fresh');
+      }
+    }
+
+    const currentDims = getDims();
+    if (this.state.dimension && this.state.dimension !== currentDims) {
+      log.info(`Dimension mismatch (stored: ${this.state.dimension}, current: ${currentDims}). Recreating index.`);
+      if (fs.existsSync(this.indexDir)) {
+        // Just delete the index files, not the whole dir which might have logs
+        const files = ['index.json', 'state.json'];
+        for (const f of files) {
+          const p = path.join(this.indexDir, f);
+          if (fs.existsSync(p)) fs.unlinkSync(p);
+        }
+        this.state = { hashes: {}, lastIndexed: 0, dimension: currentDims };
+      }
+    }
+
     if (!(await this.index.isIndexCreated())) {
       await this.index.createIndex();
-    }
-    if (fs.existsSync(this.stateFile)) {
-      this.state = JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'));
     }
   }
 
@@ -128,6 +148,7 @@ export class CodeIndexer {
     }
 
     this.state.lastIndexed = Date.now();
+    this.state.dimension = getDims();
     fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
     log.info(`Indexed ${indexed} files, skipped ${skipped}, deleted ${deleted}`);
     return { indexed, skipped, deleted };
