@@ -1,28 +1,31 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-const LOG_DIR = path.join(process.cwd(), '.logs');
-const LOG_FILE = path.join(LOG_DIR, 'codesearch.log');
 const WRITE_INTERVAL_MS = 100;
+const MAX_LOG_SIZE = 1024 * 1024; // 1MB max, then rotate
 
+let logFile: string | null = null;
 let buffer: string[] = [];
 let scheduled = false;
-let initialized = false;
 
-function ensureInit(): boolean {
-  if (initialized) return true;
-  try {
-    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-    fs.writeFileSync(LOG_FILE, '');
-    initialized = true;
-    return true;
-  } catch {
-    return false;
+export function initLogger(projectDir: string): void {
+  const logDir = path.join(projectDir, '.opencode', 'plugins', 'codesearch');
+  fs.mkdirSync(logDir, { recursive: true });
+  logFile = path.join(logDir, 'codesearch.log');
+
+  // Rotate if too large
+  if (fs.existsSync(logFile)) {
+    const stats = fs.statSync(logFile);
+    if (stats.size > MAX_LOG_SIZE) {
+      const old = path.join(logDir, 'codesearch.log.old');
+      if (fs.existsSync(old)) fs.unlinkSync(old);
+      fs.renameSync(logFile, old);
+    }
   }
 }
 
 async function flush(): Promise<void> {
-  if (buffer.length === 0) {
+  if (buffer.length === 0 || !logFile) {
     scheduled = false;
     return;
   }
@@ -30,7 +33,7 @@ async function flush(): Promise<void> {
   buffer = [];
   scheduled = false;
   try {
-    await fs.promises.appendFile(LOG_FILE, data);
+    await fs.promises.appendFile(logFile, data);
   } catch {}
 }
 
@@ -44,10 +47,10 @@ function schedule(): void {
 type Level = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
 function write(level: Level, msg: string, data?: unknown): void {
-  if (!ensureInit()) return;
+  if (!logFile) return;
   const ts = new Date().toISOString();
   const extra = data !== undefined ? ` | ${JSON.stringify(data)}` : '';
-  buffer.push(`[${ts}] [${level}] [codesearch] ${msg}${extra}\n`);
+  buffer.push(`[${ts}] [${level}] ${msg}${extra}\n`);
   schedule();
 }
 

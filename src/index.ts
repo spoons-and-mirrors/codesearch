@@ -1,24 +1,27 @@
 import { z } from 'zod';
 import { tool, type Plugin } from '@opencode-ai/plugin';
 import { CodeIndexer } from './indexer';
-import { log } from './logger';
+import { log, initLogger } from './logger';
 
 let indexer: CodeIndexer | null = null;
 let indexing = false;
 
 const plugin: Plugin = async (ctx) => {
+  initLogger(ctx.directory);
   indexer = new CodeIndexer(ctx.directory);
 
   indexer
     .init()
     .then(async () => {
-      if (!indexer!.isIndexed()) {
-        indexing = true;
-        log.info('Starting initial index...');
-        const result = await indexer!.indexProject();
-        log.info(`Indexed ${result.indexed} files (${result.skipped} unchanged)`);
-        indexing = false;
+      if (indexer!.isIndexed()) {
+        log.info('Index exists, skipping initial indexing');
+        return;
       }
+      indexing = true;
+      log.info('Starting initial index...');
+      const result = await indexer!.indexProject();
+      log.info(`Indexed ${result.indexed} files (${result.skipped} unchanged)`);
+      indexing = false;
     })
     .catch((err) => {
       log.error('Init failed', err.message);
