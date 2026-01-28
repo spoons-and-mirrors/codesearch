@@ -62,6 +62,8 @@ export class CodeIndexer {
   private stateFile: string;
   private state: StateFile = { hashes: {}, lastIndexed: 0 };
   private projectRoot: string;
+  private watchQueue: Set<string> = new Set();
+  private watchTimer: NodeJS.Timeout | null = null;
 
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
@@ -260,23 +262,15 @@ export class CodeIndexer {
     return this.state.lastIndexed > 0;
   }
 
-  watch(): void {
-    log.info(`Watching for changes in ${this.projectRoot}...`);
-    fs.watch(this.projectRoot, { recursive: true }, async (event, filename) => {
+  private async processWatchQueue(): Promise<void> {
+    const files = Array.from(this.watchQueue);
+    this.watchQueue.clear();
+    this.watchTimer = null;
+    if (files.length === 0) return;
+
+    log.info(`Processing ${files.length} changed files...`);
+    for (const filename of files) {
       try {
-        if (!filename) return;
-
-        // Skip internal plugin state changes to avoid infinite loops
-        if (filename.startsWith('.opencode')) return;
-
-        // Skip excluded paths
-        const parts = filename.split(path.sep);
-        if (parts.some((p) => EXCLUDE_DIRS.has(p))) return;
-
-        const ext = path.extname(filename);
-        if (!EXTENSIONS.has(ext)) return;
-        if (filename.includes('.test.') || filename.includes('.spec.')) return;
-
         const fullPath = path.join(this.projectRoot, filename);
 
         if (!fs.existsSync(fullPath)) {
@@ -289,18 +283,40 @@ export class CodeIndexer {
           const content = fs.readFileSync(fullPath, 'utf-8');
           const hash = crypto.createHash('sha256').update(content).digest('hex');
 
-          if (this.state.hashes[filename] === hash) return;
+          if (this.state.hashes[filename] === hash) continue;
 
-          log.info(`File ${event === 'rename' ? 'added' : 'changed'}: ${filename}`);
+          log.info(`File updated: ${filename}`);
           await this.indexFile(filename, content, hash);
           this.state.hashes[filename] = hash;
         }
-
-        this.state.lastIndexed = Date.now();
-        fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
       } catch (err: any) {
-        log.error(`Watch error for ${filename}`, err.message);
+        log.error(`Watch processing error for ${filename}`, err.message);
       }
+    }
+
+    this.state.lastIndexed = Date.now();
+    fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
+  }
+
+  watch(): void {
+    log.info(`Watching for changes in ${this.projectRoot}...`);
+    fs.watch(this.projectRoot, { recursive: true }, (event, filename) => {
+      if (!filename) return;
+
+      // Skip internal plugin state changes to avoid infinite loops
+      if (filename.startsWith('.opencode')) return;
+
+      // Skip excluded paths
+      const parts = filename.split(path.sep);
+      if (parts.some((p) => EXCLUDE_DIRS.has(p))) return;
+
+      const ext = path.extname(filename);
+      if (!EXTENSIONS.has(ext)) return;
+      if (filename.includes('.test.') || filename.includes('.spec.')) return;
+
+      this.watchQueue.add(filename);
+      if (this.watchTimer) clearTimeout(this.watchTimer);
+      this.watchTimer = setTimeout(() => this.processWatchQueue(), 2000);
     });
   }
 }
