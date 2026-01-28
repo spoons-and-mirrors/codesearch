@@ -442,7 +442,7 @@ async function fetchJson(
 const cleanup = () => {
   if (gpuChild) {
     log.info('Shutting down GPU embedding server...');
-    gpuChild.kill();
+    gpuChild.kill('SIGKILL'); // Use SIGKILL to be certain
     gpuChild = null;
   }
 };

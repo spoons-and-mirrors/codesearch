@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import os
-
+import sys
+import threading
+import time
 import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -64,11 +66,29 @@ def embed(req: EmbedRequest):
     }
 
 
+def watch_parent():
+    """Exit if the parent process dies."""
+    ppid = os.getppid()
+    if ppid == 1:
+        return  # Already orphaned or running in a container
+    while True:
+        try:
+            os.kill(ppid, 0)
+        except OSError:
+            # Parent process is gone
+            os._exit(0)
+        time.sleep(2)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', default=17373, type=int)
     args = parser.parse_args()
+
+    # Start parent watcher thread
+    watcher = threading.Thread(target=watch_parent, daemon=True)
+    watcher.start()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level='warning')
 
