@@ -4,6 +4,7 @@ import { log } from './logger';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { execSync } from 'node:child_process';
 
 const EXTENSIONS = new Set([
   '.ts',
@@ -64,6 +65,9 @@ export class CodeIndexer {
   private projectRoot: string;
   private watchQueue: Set<string> = new Set();
   private watchTimer: NodeJS.Timeout | null = null;
+  private activeWatchers: Map<string, fs.FSWatcher> = new Map();
+  private knownDirtyFiles: Set<string> = new Set();
+  private gitPollTimer: NodeJS.Timeout | null = null;
 
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
@@ -298,25 +302,78 @@ export class CodeIndexer {
     fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
   }
 
+  private queueChange(filename: string): void {
+    this.watchQueue.add(filename);
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = setTimeout(() => this.processWatchQueue(), 2000);
+  }
+
+  private pollGitStatus(): void {
+    try {
+      const output = execSync('git status --porcelain', {
+        cwd: this.projectRoot,
+        encoding: 'utf-8',
+      });
+      const currentDirtyFiles = new Set<string>();
+
+      const lines = output.split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        // Porcelain format: XY path or XY "path" or XY old -> new
+        let relPath = line.slice(3).trim();
+        if (relPath.includes(' -> ')) {
+          relPath = relPath.split(' -> ')[1].trim();
+        }
+        if (relPath.startsWith('"') && relPath.endsWith('"')) {
+          relPath = relPath.slice(1, -1);
+        }
+
+        // Basic filtering
+        const parts = relPath.split(path.sep);
+        if (parts.some((p) => EXCLUDE_DIRS.has(p))) continue;
+        const ext = path.extname(relPath);
+        if (!EXTENSIONS.has(ext)) continue;
+        if (relPath.includes('.test.') || relPath.includes('.spec.')) continue;
+
+        currentDirtyFiles.add(relPath);
+
+        if (!this.knownDirtyFiles.has(relPath)) {
+          log.debug(`New dirty file: ${relPath}. Starting watcher.`);
+          this.knownDirtyFiles.add(relPath);
+          try {
+            const fullPath = path.join(this.projectRoot, relPath);
+            if (fs.existsSync(fullPath)) {
+              const watcher = fs.watch(fullPath, () => this.queueChange(relPath));
+              this.activeWatchers.set(relPath, watcher);
+            }
+            this.queueChange(relPath);
+          } catch (err: any) {
+            log.error(`Failed to watch ${relPath}`, err.message);
+          }
+        }
+      }
+
+      // Cleanup watchers for files no longer dirty
+      for (const relPath of this.knownDirtyFiles) {
+        if (!currentDirtyFiles.has(relPath)) {
+          log.debug(`File ${relPath} clean. Stopping watcher.`);
+          const watcher = this.activeWatchers.get(relPath);
+          if (watcher) {
+            watcher.close();
+            this.activeWatchers.delete(relPath);
+          }
+          this.knownDirtyFiles.delete(relPath);
+        }
+      }
+    } catch (err: any) {
+      log.error('Git poll failed', err.message);
+    }
+  }
+
   watch(): void {
-    log.info(`Watching for changes in ${this.projectRoot}...`);
-    fs.watch(this.projectRoot, { recursive: true }, (event, filename) => {
-      if (!filename) return;
-
-      // Skip internal plugin state changes to avoid infinite loops
-      if (filename.startsWith('.opencode')) return;
-
-      // Skip excluded paths
-      const parts = filename.split(path.sep);
-      if (parts.some((p) => EXCLUDE_DIRS.has(p))) return;
-
-      const ext = path.extname(filename);
-      if (!EXTENSIONS.has(ext)) return;
-      if (filename.includes('.test.') || filename.includes('.spec.')) return;
-
-      this.watchQueue.add(filename);
-      if (this.watchTimer) clearTimeout(this.watchTimer);
-      this.watchTimer = setTimeout(() => this.processWatchQueue(), 2000);
-    });
+    log.info(`Watching Git-dirty files in ${this.projectRoot}...`);
+    this.pollGitStatus();
+    this.gitPollTimer = setInterval(() => this.pollGitStatus(), 5000);
   }
 }
