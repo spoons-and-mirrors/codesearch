@@ -1,11 +1,13 @@
 {
   "hashes": {
     "src/logger.ts": "a12c112afeed8969427582fc0975a4f01cf19f035c778259850cedd39579f085",
-    "src/embed.ts": "7ef81c1dbdedbde571187d93bc359168f9a67e8ae67fcaef2632e445b8908b27",
+    "src/embed.ts": "8190cdca9581990932362dabbe5254d8d701a348b387d8b387fad91ee01afaf7",
     "src/index.ts": "766418618ce34cc6b6a87840166c278f530b64510077e41b04f6c0fb4907b8f4",
-    "src/indexer.ts": "7cfef900f1e7337c4fdbc529f0f0d3faff24c92e5152db0e57fce2f2815b7269",
+    "src/indexer.ts": "6cc29bcf013ab83540f96b3325f771a37f63455c377084ef5155f9da5ecbc66c",
     "SPEC.md": "882d77051f9c5830e9d21976f80680091ac444a9d09e5207efbe0f1a686d4cfe",
-    "README.md": "1f06109faa9ee421218d01634195b1c6a113282e8284469504c8da357b5260ee"
+    "README.md": "adcc21dde3723570687e8229ddd1468b14e3deed742c3a852de1b5e61afef7b7",
+    "scripts/gpu_embeddings_server.py": "bf4daa85aac16e0e8a685752181705a9f35b7d71735e73b6116c5da5d440fc43"
   },
-  "lastIndexed": 1769552150651
+  "lastIndexed": 1769560272975,
+  "dimension": 768
 }
